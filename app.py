@@ -5,9 +5,12 @@ from datetime import datetime, timezone
 import json, os, psycopg, urllib.error, urllib.request
 from psycopg.rows import dict_row
 
-app=FastAPI(title='UNG-PROCURE',version='1.0.0')
+app=FastAPI(title='UNG-PROCURE',version='1.1.0')
 DB=os.getenv('DATABASE_URL','')
 JANUS_BASE_URL=os.getenv('JANUS_BASE_URL','https://ung-iam-production.up.railway.app').rstrip('/')
+NEXUS_BASE_URL=os.getenv('NEXUS_BASE_URL','https://ung-nexus-production.up.railway.app').rstrip('/')
+MIDAS_BASE_URL=os.getenv('MIDAS_BASE_URL','https://ung-midas-production.up.railway.app').rstrip('/')
+VECTOR_BASE_URL=os.getenv('VECTOR_BASE_URL','https://ung-vector-production.up.railway.app').rstrip('/')
 def conn(): return psycopg.connect(DB,row_factory=dict_row)
 def auth(permission,authorization):
     if not authorization or not authorization.lower().startswith('bearer '): raise HTTPException(401,'JANUS bearer token required')
@@ -21,6 +24,13 @@ def auth(permission,authorization):
     principal=data.get('principal') or {}; perms=set(principal.get('permissions') or [])
     if permission not in perms and 'ung.admin' not in perms: raise HTTPException(403,f'Missing JANUS permission: {permission}')
     return principal
+def emit(target,message_type,payload,authorization):
+    if not NEXUS_BASE_URL:return {'status':'disabled'}
+    body=json.dumps({'source_system':'UNG-PROCURE','target_system':target,'message_type':message_type,'payload':payload}).encode()
+    req=urllib.request.Request(NEXUS_BASE_URL+'/v1/messages',data=body,method='POST',headers={'Authorization':authorization,'Content-Type':'application/json','User-Agent':'UNG-PROCURE/1.1.0'})
+    try:
+        with urllib.request.urlopen(req,timeout=8) as r:return {'status':'delivered','response_code':r.status,'response':json.loads(r.read().decode() or '{}')}
+    except Exception as e:return {'status':'failed','error':str(e)[:300]}
 @app.on_event('startup')
 def init():
     if DB:
@@ -29,20 +39,23 @@ def init():
             c.execute('CREATE TABLE IF NOT EXISTS procure_vendors(id UUID PRIMARY KEY,name TEXT,email TEXT,status TEXT,risk_level TEXT,created_at TIMESTAMPTZ)')
             c.execute('CREATE TABLE IF NOT EXISTS procure_bids(id UUID PRIMARY KEY,request_id UUID,vendor_id UUID,amount DOUBLE PRECISION,currency TEXT,score DOUBLE PRECISION,status TEXT,submitted_at TIMESTAMPTZ)')
             c.execute('CREATE TABLE IF NOT EXISTS procure_orders(id UUID PRIMARY KEY,request_id UUID,vendor_id UUID,amount DOUBLE PRECISION,currency TEXT,status TEXT,issued_at TIMESTAMPTZ,updated_at TIMESTAMPTZ)')
+            c.execute('CREATE TABLE IF NOT EXISTS procure_integration_events(id UUID PRIMARY KEY,order_id UUID,target_system TEXT,message_type TEXT,status TEXT,response JSONB,created_at TIMESTAMPTZ)')
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
 class VendorIn(BaseModel): name:str; email:str; risk_level:str='normal'
 class BidIn(BaseModel): request_id:str; vendor_id:str; amount:float; currency:str='USD'; score:float=0
 class AwardIn(BaseModel): bid_id:str
+@app.get('/')
+def root(): return {'service':'UNG-PROCURE','status':'online','version':'1.1.0','nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
 @app.get('/health')
-def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.0.0'}
+def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.1.0'}
 @app.get('/ready')
 def ready():
     try:
         with conn() as c:c.execute('SELECT 1')
-        return {'status':'ready','database':'connected','janus':JANUS_BASE_URL}
+        return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','nexus-events','midas-finance-handoff','vector-receiving-handoff']}
 @app.get('/v1/requests')
 def list_requests(authorization:str|None=Header(None)):
     auth('procure.requests.read',authorization)
@@ -86,11 +99,21 @@ def award(b:AwardIn,authorization:str|None=Header(None)):
         if not bid: raise HTTPException(404,'bid_not_found')
         c.execute("UPDATE procure_bids SET status='awarded' WHERE id=%s",(b.bid_id,))
         c.execute("UPDATE procure_requests SET status='awarded',updated_at=%s WHERE id=%s",(now,bid['request_id']))
-        return c.execute('INSERT INTO procure_orders VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *',(str(uuid4()),bid['request_id'],bid['vendor_id'],bid['amount'],bid['currency'],'issued',now,now)).fetchone()
+        order=c.execute('INSERT INTO procure_orders VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *',(str(uuid4()),bid['request_id'],bid['vendor_id'],bid['amount'],bid['currency'],'issued',now,now)).fetchone()
+    payload={'order_id':str(order['id']),'request_id':str(order['request_id']),'vendor_id':str(order['vendor_id']),'amount':order['amount'],'currency':order['currency'],'status':order['status']}
+    results={}
+    for target,mtype in [('UNG-MIDAS','PROCURE.PURCHASE_ORDER.AWARDED'),('UNG-VECTOR','PROCURE.PURCHASE_ORDER.RECEIVING_EXPECTED')]:
+        result=emit(target,mtype,payload,authorization); results[target]=result
+        with conn() as c:c.execute('INSERT INTO procure_integration_events VALUES(%s,%s,%s,%s,%s,%s,%s)',(str(uuid4()),str(order['id']),target,mtype,result['status'],json.dumps(result),now))
+    return {'order':order,'integration':results}
 @app.get('/v1/orders')
 def orders(authorization:str|None=Header(None)):
     auth('procure.orders.read',authorization)
     with conn() as c:return c.execute('SELECT * FROM procure_orders ORDER BY issued_at DESC').fetchall()
+@app.get('/v1/integration/events')
+def integration_events(authorization:str|None=Header(None)):
+    auth('procure.orders.read',authorization)
+    with conn() as c:return c.execute('SELECT * FROM procure_integration_events ORDER BY created_at DESC LIMIT 100').fetchall()
 @app.get('/v1/summary')
 def summary(authorization:str|None=Header(None)):
     auth('procure.requests.read',authorization)
