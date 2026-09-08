@@ -54,6 +54,9 @@ def run_acceptance_probe():
                 c.execute('INSERT INTO procure_acceptance_checks VALUES(%s,%s,%s,%s,%s,%s,%s)',(str(uuid4()),probe_id,target,mtype,result.get('status'),json.dumps(result),now))
         except Exception: pass
 
+from inbound_layers import router as inbound_router
+app.include_router(inbound_router)
+
 @app.on_event('startup')
 def init():
     if DB:
