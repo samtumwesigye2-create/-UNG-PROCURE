@@ -4,8 +4,11 @@ from uuid import uuid4
 from datetime import datetime, timezone
 import json, os, psycopg, urllib.error, urllib.request
 from psycopg.rows import dict_row
+from supplier_profiles import init_supplier_profiles
+from purchasing_documents import init_purchasing_documents
+from procure_matching import init_procure_matching
 
-app=FastAPI(title='UNG-PROCURE',version='1.2.0')
+app=FastAPI(title='UNG-PROCURE',version='1.3.0')
 DB=os.getenv('DATABASE_URL','')
 JANUS_BASE_URL=os.getenv('JANUS_BASE_URL','https://ung-iam-production.up.railway.app').rstrip('/')
 NEXUS_BASE_URL=os.getenv('NEXUS_BASE_URL','https://ung-nexus-production.up.railway.app').rstrip('/')
@@ -35,7 +38,7 @@ def emit(target,message_type,payload):
     authorization=service_authorization()
     if not authorization:return {'status':'failed','error':'procure_service_token_missing'}
     body=json.dumps({'source_system':'UNG-PROCURE','target_system':target,'message_type':message_type,'payload':payload}).encode()
-    req=urllib.request.Request(NEXUS_BASE_URL+'/v1/messages',data=body,method='POST',headers={'Authorization':authorization,'Content-Type':'application/json','User-Agent':'UNG-PROCURE/1.2.0'})
+    req=urllib.request.Request(NEXUS_BASE_URL+'/v1/messages',data=body,method='POST',headers={'Authorization':authorization,'Content-Type':'application/json','User-Agent':'UNG-PROCURE/1.3.0'})
     try:
         with urllib.request.urlopen(req,timeout=8) as r:return {'status':'delivered','response_code':r.status,'response':json.loads(r.read().decode() or '{}')}
     except urllib.error.HTTPError as e:
@@ -64,6 +67,9 @@ def init():
             c.execute('CREATE TABLE IF NOT EXISTS procure_orders(id UUID PRIMARY KEY,request_id UUID,vendor_id UUID,amount DOUBLE PRECISION,currency TEXT,status TEXT,issued_at TIMESTAMPTZ,updated_at TIMESTAMPTZ)')
             c.execute('CREATE TABLE IF NOT EXISTS procure_integration_events(id UUID PRIMARY KEY,order_id UUID,target_system TEXT,message_type TEXT,status TEXT,response JSONB,created_at TIMESTAMPTZ)')
             c.execute('CREATE TABLE IF NOT EXISTS procure_acceptance_checks(id UUID PRIMARY KEY,probe_id TEXT,target_system TEXT,message_type TEXT,status TEXT,response JSONB,created_at TIMESTAMPTZ)')
+        init_supplier_profiles(conn)
+        init_purchasing_documents(conn)
+        init_procure_matching(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
@@ -72,9 +78,9 @@ class BidIn(BaseModel): request_id:str; vendor_id:str; amount:float; currency:st
 class AwardIn(BaseModel): bid_id:str
 
 @app.get('/')
-def root(): return {'service':'UNG-PROCURE','status':'online','version':'1.2.0','nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
+def root(): return {'service':'UNG-PROCURE','status':'online','version':'1.3.0','nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
 @app.get('/health')
-def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.2.0'}
+def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.3.0'}
 @app.get('/ready')
 def ready():
     try:
@@ -82,7 +88,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
