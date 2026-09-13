@@ -7,8 +7,9 @@ from psycopg.rows import dict_row
 from supplier_profiles import init_supplier_profiles
 from purchasing_documents import init_purchasing_documents
 from procure_matching import init_procure_matching
+from demand_intelligence import init_demand_intelligence, classify_demand, forecast_demand, calculate_replenishment
 
-app=FastAPI(title='UNG-PROCURE',version='1.3.0')
+app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
 JANUS_BASE_URL=os.getenv('JANUS_BASE_URL','https://ung-iam-production.up.railway.app').rstrip('/')
 NEXUS_BASE_URL=os.getenv('NEXUS_BASE_URL','https://ung-nexus-production.up.railway.app').rstrip('/')
@@ -38,7 +39,7 @@ def emit(target,message_type,payload):
     authorization=service_authorization()
     if not authorization:return {'status':'failed','error':'procure_service_token_missing'}
     body=json.dumps({'source_system':'UNG-PROCURE','target_system':target,'message_type':message_type,'payload':payload}).encode()
-    req=urllib.request.Request(NEXUS_BASE_URL+'/v1/messages',data=body,method='POST',headers={'Authorization':authorization,'Content-Type':'application/json','User-Agent':'UNG-PROCURE/1.3.0'})
+    req=urllib.request.Request(NEXUS_BASE_URL+'/v1/messages',data=body,method='POST',headers={'Authorization':authorization,'Content-Type':'application/json','User-Agent':'UNG-PROCURE/1.4.0'})
     try:
         with urllib.request.urlopen(req,timeout=8) as r:return {'status':'delivered','response_code':r.status,'response':json.loads(r.read().decode() or '{}')}
     except urllib.error.HTTPError as e:
@@ -70,17 +71,26 @@ def init():
         init_supplier_profiles(conn)
         init_purchasing_documents(conn)
         init_procure_matching(conn)
+        init_demand_intelligence(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
 class VendorIn(BaseModel): name:str; email:str; risk_level:str='normal'
 class BidIn(BaseModel): request_id:str; vendor_id:str; amount:float; currency:str='USD'; score:float=0
 class AwardIn(BaseModel): bid_id:str
+class DemandHistoryIn(BaseModel): period_start:datetime; quantity:float
+class DemandAnalysisIn(BaseModel):
+    on_hand:float=0
+    inbound:float=0
+    allocated:float=0
+    supplier_lead_time_days:float=0
+    review_period_days:float=30
+    service_level_factor:float=1.65
 
 @app.get('/')
-def root(): return {'service':'UNG-PROCURE','status':'online','version':'1.3.0','nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
+def root(): return {'service':'UNG-PROCURE','status':'online','version':'1.4.0','nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL}
 @app.get('/health')
-def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.3.0'}
+def health(): return {'status':'ok','service':'UNG-PROCURE','version':'1.4.0'}
 @app.get('/ready')
 def ready():
     try:
@@ -88,7 +98,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
@@ -159,3 +169,42 @@ def integration_events(authorization:str|None=Header(None)):
 def summary(authorization:str|None=Header(None)):
     auth('procure.requests.read',authorization)
     with conn() as c:return {'requests':c.execute('SELECT COUNT(*) n FROM procure_requests').fetchone()['n'],'vendors':c.execute('SELECT COUNT(*) n FROM procure_vendors').fetchone()['n'],'bids':c.execute('SELECT COUNT(*) n FROM procure_bids').fetchone()['n'],'orders':c.execute('SELECT COUNT(*) n FROM procure_orders').fetchone()['n']}
+
+@app.post('/v1/demand/history',status_code=201)
+def add_demand_history(b:DemandHistoryIn,sku:str,authorization:str|None=Header(None)):
+    auth('procure.demand.write',authorization)
+    if b.quantity < 0: raise HTTPException(422,'demand_must_be_non_negative')
+    now=datetime.now(timezone.utc)
+    with conn() as c:
+        return c.execute('INSERT INTO demand_history(id,sku,period_start,quantity,created_at) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(sku,period_start) DO UPDATE SET quantity=EXCLUDED.quantity,created_at=EXCLUDED.created_at RETURNING *',(str(uuid4()),sku,b.period_start,b.quantity,now)).fetchone()
+
+@app.get('/v1/demand/history/{sku}')
+def get_demand_history(sku:str,authorization:str|None=Header(None)):
+    auth('procure.demand.read',authorization)
+    with conn() as c:return c.execute('SELECT * FROM demand_history WHERE sku=%s ORDER BY period_start ASC',(sku,)).fetchall()
+
+@app.post('/v1/demand/analyze/{sku}')
+def analyze_demand(sku:str,b:DemandAnalysisIn,authorization:str|None=Header(None)):
+    auth('procure.demand.write',authorization)
+    if min(b.on_hand,b.inbound,b.allocated,b.supplier_lead_time_days,b.service_level_factor) < 0 or b.review_period_days <= 0:
+        raise HTTPException(422,'invalid_replenishment_inputs')
+    with conn() as c:
+        rows=c.execute('SELECT quantity FROM demand_history WHERE sku=%s ORDER BY period_start ASC',(sku,)).fetchall()
+    if not rows: raise HTTPException(404,'demand_history_not_found')
+    history=[float(r['quantity']) for r in rows]
+    classification=classify_demand(history)
+    forecast=forecast_demand(history,classification['demand_class'])
+    replenishment=calculate_replenishment(history,forecast['forecast_quantity'],b.on_hand,b.inbound,b.allocated,b.supplier_lead_time_days,b.review_period_days,b.service_level_factor)
+    now=datetime.now(timezone.utc); recommendation_id=str(uuid4())
+    payload={'recommendation_id':recommendation_id,'sku':sku,**classification,**forecast,**replenishment,'on_hand':b.on_hand,'inbound':b.inbound,'allocated':b.allocated,'supplier_lead_time_days':b.supplier_lead_time_days}
+    with conn() as c:
+        c.execute('INSERT INTO demand_recommendations(id,sku,demand_class,adi,cv2,forecast_quantity,forecast_model,mae,wape,on_hand,inbound,allocated,supplier_lead_time_days,safety_stock,reorder_point,recommended_order_quantity,stockout_risk,status,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',(recommendation_id,sku,classification['demand_class'],classification['adi'],classification['cv2'],forecast['forecast_quantity'],forecast['forecast_model'],forecast['mae'],forecast['wape'],b.on_hand,b.inbound,b.allocated,b.supplier_lead_time_days,replenishment['safety_stock'],replenishment['reorder_point'],replenishment['recommended_order_quantity'],replenishment['stockout_risk'],replenishment['status'],now))
+    integration={'status':'not_required'}
+    if replenishment['status']=='reorder':
+        integration=emit('UNG-VECTOR','PROCURE.REPLENISHMENT.RECOMMENDED',payload)
+    return {'recommendation':payload,'integration':integration}
+
+@app.get('/v1/demand/recommendations')
+def demand_recommendations(authorization:str|None=Header(None)):
+    auth('procure.demand.read',authorization)
+    with conn() as c:return c.execute('SELECT * FROM demand_recommendations ORDER BY created_at DESC LIMIT 100').fetchall()
