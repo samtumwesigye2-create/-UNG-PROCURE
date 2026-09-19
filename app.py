@@ -212,4 +212,4 @@ def demand_recommendations(authorization:str|None=Header(None)):
     with conn() as c:return c.execute('SELECT * FROM demand_recommendations ORDER BY created_at DESC LIMIT 100').fetchall()
 
 
-install_planning_routes(app, conn, auth)
+install_planning_routes(app, conn, auth, emit)
