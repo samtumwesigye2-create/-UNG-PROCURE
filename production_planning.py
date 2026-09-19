@@ -3,6 +3,7 @@ from math import ceil
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
+from integration_events import mps_released, mrp_completed, production_reported
 
 router = APIRouter(prefix="/v1/planning", tags=["S&OP, MPS, MRP and Procurement Planning"])
 
@@ -218,7 +219,7 @@ def install_planning_routes(app, conn, auth):
             row=c.execute("UPDATE procure_mps SET actual_qty=%s,status='released',updated_at=%s WHERE id=%s RETURNING *",(actual_qty,now(),mps_id)).fetchone()
             if not row: raise HTTPException(404,"mps_not_found")
         adherence=100.0 if row["planned_qty"]==0 else max(0.0,100.0*(1-abs(row["actual_qty"]-row["planned_qty"])/row["planned_qty"]))
-        return {"mps":row,"schedule_adherence_pct":round(adherence,2)}
+        return {"mps":row,"schedule_adherence_pct":round(adherence,2),"integration_event":mps_released(row)}
 
     @router.post("/mrp/run")
     def run_mrp(b:MrpRunIn, authorization:str|None=Header(None)):
@@ -241,7 +242,8 @@ def install_planning_routes(app, conn, auth):
                 row=c.execute("""INSERT INTO procure_mrp_requirements VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                   (str(uuid4()),run_id,item["component_sku"],gross,on,receipts,safety,net,planned)).fetchone()
                 out.append(row)
-        return {"run_id":run_id,"product_sku":b.product_sku,"planned_qty":b.planned_qty,"requirements":out}
+        run={"id":run_id,"product_sku":b.product_sku,"period_start":b.period_start,"planned_qty":b.planned_qty}
+        return {"run_id":run_id,"product_sku":b.product_sku,"planned_qty":b.planned_qty,"requirements":out,"integration_event":mrp_completed(run,out)}
 
     @router.get("/mrp/{run_id}")
     def get_mrp(run_id:str, authorization:str|None=Header(None)):
@@ -286,7 +288,7 @@ def install_planning_routes(app, conn, auth):
               (status,actual_start,actual_end,completed,good,scrap,downtime,t,order_id)).fetchone()
         adherence=100.0 if out["planned_qty"]==0 else max(0.0,100.0*(1-abs(out["completed_qty"]-out["planned_qty"])/out["planned_qty"]))
         quality=100.0*(out["good_qty"]/(out["good_qty"]+out["scrap_qty"])) if (out["good_qty"]+out["scrap_qty"])>0 else None
-        return {"order":out,"production_schedule_adherence_pct":round(adherence,2),"quality_yield_pct":round(quality,2) if quality is not None else None}
+        return {"order":out,"production_schedule_adherence_pct":round(adherence,2),"quality_yield_pct":round(quality,2) if quality is not None else None,"integration_event":production_reported(out)}
 
     @router.get("/production-orders")
     def list_production_orders(authorization:str|None=Header(None)):
