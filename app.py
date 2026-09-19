@@ -8,6 +8,7 @@ from supplier_profiles import init_supplier_profiles
 from purchasing_documents import init_purchasing_documents
 from procure_matching import init_procure_matching
 from demand_intelligence import init_demand_intelligence, classify_demand, forecast_demand, calculate_replenishment
+from production_planning import init_planning, install_planning_routes
 
 app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
@@ -72,6 +73,7 @@ def init():
         init_purchasing_documents(conn)
         init_procure_matching(conn)
         init_demand_intelligence(conn)
+        init_planning(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
@@ -98,7 +100,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','sop','bom','mps','mrp','capacity-planning','production-schedule-adherence']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
@@ -208,3 +210,6 @@ def analyze_demand(sku:str,b:DemandAnalysisIn,authorization:str|None=Header(None
 def demand_recommendations(authorization:str|None=Header(None)):
     auth('procure.demand.read',authorization)
     with conn() as c:return c.execute('SELECT * FROM demand_recommendations ORDER BY created_at DESC LIMIT 100').fetchall()
+
+
+install_planning_routes(app, conn, auth)
