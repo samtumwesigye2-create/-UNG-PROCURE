@@ -231,9 +231,6 @@ def init_demand_intelligence(conn_factory):
                 UNIQUE(sku,period_start)
             )"""
         )
-        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS mape DOUBLE PRECISION")
-        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS wmape DOUBLE PRECISION")
-        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS forecast_bias DOUBLE PRECISION")
         c.execute(
             """CREATE TABLE IF NOT EXISTS demand_recommendations(
                 id UUID PRIMARY KEY,
@@ -260,3 +257,6 @@ def init_demand_intelligence(conn_factory):
                 created_at TIMESTAMPTZ NOT NULL
             )"""
         )
+        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS mape DOUBLE PRECISION")
+        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS wmape DOUBLE PRECISION")
+        c.execute("ALTER TABLE demand_recommendations ADD COLUMN IF NOT EXISTS forecast_bias DOUBLE PRECISION")
