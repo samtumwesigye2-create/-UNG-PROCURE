@@ -68,6 +68,21 @@ class GateDecision(BaseModel):
     passed: bool
     note: str = ""
 
+class ProductionOrderIn(BaseModel):
+    mps_id: str | None = None
+    product_sku: str
+    planned_qty: float = Field(gt=0)
+    work_center: str | None = None
+    planned_start: datetime
+    planned_end: datetime | None = None
+
+class ProductionUpdate(BaseModel):
+    action: str
+    completed_qty: float | None = Field(default=None, ge=0)
+    good_qty: float | None = Field(default=None, ge=0)
+    scrap_qty: float | None = Field(default=None, ge=0)
+    downtime_minutes: float | None = Field(default=None, ge=0)
+
 def init_planning(conn):
     with conn() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS procure_boms(
@@ -102,6 +117,13 @@ def init_planning(conn):
           on_hand DOUBLE PRECISION NOT NULL, scheduled_receipts DOUBLE PRECISION NOT NULL,
           safety_stock DOUBLE PRECISION NOT NULL, net_requirement DOUBLE PRECISION NOT NULL,
           planned_order_qty DOUBLE PRECISION NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS procure_production_orders(
+          id UUID PRIMARY KEY, order_number TEXT UNIQUE NOT NULL, mps_id UUID NULL REFERENCES procure_mps(id),
+          product_sku TEXT NOT NULL, planned_qty DOUBLE PRECISION NOT NULL, completed_qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+          work_center TEXT NULL, planned_start TIMESTAMPTZ NOT NULL, planned_end TIMESTAMPTZ NULL,
+          actual_start TIMESTAMPTZ NULL, actual_end TIMESTAMPTZ NULL, status TEXT NOT NULL DEFAULT 'planned',
+          good_qty DOUBLE PRECISION NOT NULL DEFAULT 0, scrap_qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+          downtime_minutes DOUBLE PRECISION NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)""")
         c.execute("""CREATE TABLE IF NOT EXISTS procure_plans(
           id UUID PRIMARY KEY, plan_number TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
           business_need TEXT NOT NULL, budget DOUBLE PRECISION NOT NULL, currency TEXT NOT NULL,
@@ -229,6 +251,47 @@ def install_planning_routes(app, conn, auth):
             if not run: raise HTTPException(404,"mrp_run_not_found")
             reqs=c.execute("SELECT * FROM procure_mrp_requirements WHERE run_id=%s ORDER BY component_sku",(run_id,)).fetchall()
         return {"run":run,"requirements":reqs}
+
+    @router.post("/production-orders", status_code=201)
+    def create_production_order(b:ProductionOrderIn, authorization:str|None=Header(None)):
+        auth("procure.production.write", authorization); t=now()
+        with conn() as c:
+            n=c.execute("SELECT COUNT(*) n FROM procure_production_orders").fetchone()["n"]+1
+            number=f"MO-{t.year}-{n:06d}"
+            row=c.execute("""INSERT INTO procure_production_orders(
+              id,order_number,mps_id,product_sku,planned_qty,completed_qty,work_center,planned_start,planned_end,
+              actual_start,actual_end,status,good_qty,scrap_qty,downtime_minutes,created_at,updated_at)
+              VALUES(%s,%s,%s,%s,%s,0,%s,%s,%s,NULL,NULL,'planned',0,0,0,%s,%s) RETURNING *""",
+              (str(uuid4()),number,b.mps_id,b.product_sku,b.planned_qty,b.work_center,b.planned_start,b.planned_end,t,t)).fetchone()
+        return row
+
+    @router.post("/production-orders/{order_id}/action")
+    def production_order_action(order_id:str,b:ProductionUpdate,authorization:str|None=Header(None)):
+        auth("procure.production.write", authorization)
+        allowed={"release","start","report","complete","hold","cancel"}
+        if b.action not in allowed: raise HTTPException(422,"invalid_production_action")
+        t=now()
+        with conn() as c:
+            row=c.execute("SELECT * FROM procure_production_orders WHERE id=%s FOR UPDATE",(order_id,)).fetchone()
+            if not row: raise HTTPException(404,"production_order_not_found")
+            status={"release":"released","start":"in_progress","report":row["status"],"complete":"complete","hold":"hold","cancel":"cancelled"}[b.action]
+            actual_start=row["actual_start"] or (t if b.action=="start" else None)
+            actual_end=t if b.action=="complete" else row["actual_end"]
+            completed=row["completed_qty"] if b.completed_qty is None else b.completed_qty
+            good=row["good_qty"] if b.good_qty is None else b.good_qty
+            scrap=row["scrap_qty"] if b.scrap_qty is None else b.scrap_qty
+            downtime=row["downtime_minutes"] if b.downtime_minutes is None else b.downtime_minutes
+            out=c.execute("""UPDATE procure_production_orders SET status=%s,actual_start=%s,actual_end=%s,
+              completed_qty=%s,good_qty=%s,scrap_qty=%s,downtime_minutes=%s,updated_at=%s WHERE id=%s RETURNING *""",
+              (status,actual_start,actual_end,completed,good,scrap,downtime,t,order_id)).fetchone()
+        adherence=100.0 if out["planned_qty"]==0 else max(0.0,100.0*(1-abs(out["completed_qty"]-out["planned_qty"])/out["planned_qty"]))
+        quality=100.0*(out["good_qty"]/(out["good_qty"]+out["scrap_qty"])) if (out["good_qty"]+out["scrap_qty"])>0 else None
+        return {"order":out,"production_schedule_adherence_pct":round(adherence,2),"quality_yield_pct":round(quality,2) if quality is not None else None}
+
+    @router.get("/production-orders")
+    def list_production_orders(authorization:str|None=Header(None)):
+        auth("procure.production.read", authorization)
+        with conn() as c:return c.execute("SELECT * FROM procure_production_orders ORDER BY planned_start DESC LIMIT 500").fetchall()
 
     @router.post("/procurement-plans", status_code=201)
     def create_procurement_plan(b:ProcurementPlanIn, authorization:str|None=Header(None)):
