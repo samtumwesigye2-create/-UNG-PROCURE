@@ -53,6 +53,28 @@ def mae(actual, predicted):
     return sum(abs(float(a) - float(p)) for a, p in zip(actual, predicted)) / len(actual)
 
 
+def mape(actual, predicted):
+    if not actual or len(actual) != len(predicted):
+        return None
+    pairs=[(float(a),float(p)) for a,p in zip(actual,predicted) if float(a)!=0]
+    if not pairs:
+        return 0.0
+    return sum(abs((a-p)/a) for a,p in pairs)/len(pairs)
+
+
+def wmape(actual, predicted):
+    return wape(actual, predicted)
+
+
+def forecast_bias(actual, predicted):
+    if not actual or len(actual) != len(predicted):
+        return None
+    denominator=sum(abs(float(a)) for a in actual)
+    if denominator == 0:
+        return 0.0
+    return sum(float(p)-float(a) for a,p in zip(actual,predicted))/denominator
+
+
 def wape(actual, predicted):
     if not actual or len(actual) != len(predicted):
         return None
@@ -143,6 +165,9 @@ def forecast_demand(history, demand_class=None):
         "forecast_model": model_name,
         "mae": mae(actual, predicted),
         "wape": wape(actual, predicted),
+        "mape": mape(actual, predicted),
+        "wmape": wmape(actual, predicted),
+        "forecast_bias": forecast_bias(actual, predicted),
     }
 
 
