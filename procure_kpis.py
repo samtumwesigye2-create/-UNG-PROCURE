@@ -50,7 +50,22 @@ def snapshot():
   if v:out.append(('responsible_sourcing_coverage',100*g/v))
   cr=c.execute('SELECT COUNT(*) n FROM procure_supplier_governance WHERE critical_supplier=TRUE').fetchone()['n']; rr=c.execute('SELECT COUNT(*) n FROM procure_supplier_governance WHERE critical_supplier=TRUE AND risk_review_current=TRUE').fetchone()['n']
   if cr:out.append(('critical_supplier_risk_coverage',100*rr/cr))
- return out
+  cyc=c.execute("""SELECT AVG(EXTRACT(EPOCH FROM(o.issued_at-r.created_at))/60.0) mins
+    FROM procure_orders o JOIN procure_requests r ON r.id=o.request_id
+    WHERE o.issued_at IS NOT NULL AND r.created_at IS NOT NULL""").fetchone()
+  if cyc['mins'] is not None:out.append(('purchase_order_cycle_time',float(cyc['mins'])))
+  sav=c.execute("""SELECT COALESCE(SUM(r.estimated_value),0)::double precision baseline,
+    COALESCE(SUM(o.amount),0)::double precision awarded
+    FROM procure_orders o JOIN procure_requests r ON r.id=o.request_id
+    WHERE r.estimated_value>0""").fetchone()
+  if sav['baseline']>0:out.append(('procurement_cost_savings',100*(sav['baseline']-sav['awarded'])/sav['baseline']))
+  spend=c.execute("""SELECT COALESCE(SUM(amount),0)::double precision total,
+    COALESCE(SUM(amount) FILTER(WHERE request_id IS NOT NULL),0)::double precision categorized
+    FROM procure_orders""").fetchone()
+  if spend['total']>0:out.append(('spend_visibility_ratio',100*spend['categorized']/spend['total']))
+  contracts=c.execute("""SELECT COUNT(*) total,COUNT(*) FILTER(WHERE request_id IS NOT NULL) covered FROM procure_orders""").fetchone()
+  if contracts['total']:out.append(('contract_compliance_rate',100*contracts['covered']/contracts['total']))
+  return out
 
 @router.get('/snapshot')
 def kpi_snapshot(authorization:str|None=Header(None)):
