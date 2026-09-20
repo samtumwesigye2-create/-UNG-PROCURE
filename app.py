@@ -9,6 +9,7 @@ from purchasing_documents import init_purchasing_documents
 from procure_matching import init_procure_matching
 from demand_intelligence import init_demand_intelligence, classify_demand, forecast_demand, calculate_replenishment
 from production_planning import init_planning, install_planning_routes
+from manufacturing_operations import init_production, install_production_routes
 
 app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
@@ -74,6 +75,7 @@ def init():
         init_procure_matching(conn)
         init_demand_intelligence(conn)
         init_planning(conn)
+        init_production(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
@@ -213,3 +215,5 @@ def demand_recommendations(authorization:str|None=Header(None)):
 
 
 install_planning_routes(app, conn, auth, emit)
+
+install_production_routes(app, conn, auth)
