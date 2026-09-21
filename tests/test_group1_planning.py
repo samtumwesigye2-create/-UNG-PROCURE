@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime, timezone
 
-from production_planning import calculate_mrp_line
+from production_planning import calculate_mrp_line, material_planning_defaults
 
 
 def test_mrp_lot_for_lot_matches_net_requirement():
@@ -36,3 +36,33 @@ def test_mrp_rejects_bad_policy_and_multiple():
         calculate_mrp_line(10,lot_policy='weird')
     with pytest.raises(ValueError,match='order_multiple_must_be_positive'):
         calculate_mrp_line(10,order_multiple=0)
+
+
+def test_vector_material_master_defaults_are_applied():
+    master={
+        'planning':{
+            'mrp_policy':'minimum',
+            'safety_stock':5,
+            'min_order_qty':10,
+            'order_multiple':6,
+            'lead_time_days':4,
+            'make_buy':'buy',
+        },
+        'sources':[
+            {'supplier_id':'SUP-A','approved':True},
+            {'supplier_id':'SUP-B','approved':False},
+        ],
+    }
+    d=material_planning_defaults(master)
+    assert d['lot_policy']=='minimum'
+    assert d['safety_stock']==5
+    assert d['min_order_qty']==10
+    assert d['order_multiple']==6
+    assert d['lead_time_days']==4
+    assert d['make_buy']=='buy'
+    assert [x['supplier_id'] for x in d['approved_sources']]==['SUP-A']
+
+
+def test_vector_unknown_policy_falls_back_to_lot_for_lot():
+    d=material_planning_defaults({'planning':{'mrp_policy':'custom'}})
+    assert d['lot_policy']=='lot_for_lot'
