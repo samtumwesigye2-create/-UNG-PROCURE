@@ -170,13 +170,11 @@ def award(b:AwardIn,authorization:str|None=Header(None)):
         if not bid: raise HTTPException(404,'bid_not_found')
         c.execute("UPDATE procure_bids SET status='awarded' WHERE id=%s",(b.bid_id,))
         c.execute("UPDATE procure_requests SET status='awarded',updated_at=%s WHERE id=%s",(now,bid['request_id']))
-        order=c.execute('INSERT INTO procure_orders VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *',(str(uuid4()),bid['request_id'],bid['vendor_id'],bid['amount'],bid['currency'],'issued',now,now)).fetchone()
-    payload={'order_id':str(order['id']),'request_id':str(order['request_id']),'vendor_id':str(order['vendor_id']),'amount':order['amount'],'currency':order['currency'],'status':order['status']}
-    results={}
-    for target,mtype in [('UNG-MIDAS','PROCURE.PURCHASE_ORDER.AWARDED'),('UNG-VECTOR','PROCURE.PURCHASE_ORDER.RECEIVING_EXPECTED')]:
-        result=emit(target,mtype,payload); results[target]=result
-        with conn() as c:c.execute('INSERT INTO procure_integration_events VALUES(%s,%s,%s,%s,%s,%s,%s)',(str(uuid4()),str(order['id']),target,mtype,result['status'],json.dumps(result),now))
-    return {'order':order,'integration':results}
+        order=c.execute("""INSERT INTO procure_orders
+          (id,request_id,vendor_id,amount,currency,status,issued_at,updated_at,budget_scope,released_at)
+          VALUES(%s,%s,%s,%s,%s,'draft',%s,%s,NULL,NULL) RETURNING *""",
+          (str(uuid4()),bid['request_id'],bid['vendor_id'],bid['amount'],bid['currency'],now,now)).fetchone()
+    return {'order':order,'status':'draft_pending_release'}
 @app.get('/v1/orders')
 def orders(authorization:str|None=Header(None)):
     auth('procure.orders.read',authorization)
