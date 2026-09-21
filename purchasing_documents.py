@@ -313,7 +313,22 @@ def release_order(order_id: str, authorization: str | None = Header(None)):
                 raise HTTPException(409,f'budget_ceiling_exceeded:remaining={remaining}:order={total}')
             c.execute('UPDATE procure_budget_controls SET reserved_amount=reserved_amount+%s,updated_at=%s WHERE scope=%s',(total,t,order['budget_scope']))
         released=c.execute("UPDATE procure_orders SET amount=%s,status='issued',released_at=%s,updated_at=%s WHERE id=%s RETURNING *",(total,t,t,order_id)).fetchone()
-    return {'order':released,'lines':lines,'budget_check':'passed'}
+    from app import emit
+    payload={
+        'order_id':str(released['id']),
+        'request_id':str(released['request_id']),
+        'vendor_id':str(released['vendor_id']),
+        'amount':float(released['amount']),
+        'currency':released['currency'],
+        'status':released['status'],
+    }
+    deliveries={}
+    for target,mtype in [('UNG-MIDAS','PROCURE.PURCHASE_ORDER.AWARDED'),('UNG-VECTOR','PROCURE.PURCHASE_ORDER.RECEIVING_EXPECTED')]:
+        result=emit(target,mtype,payload); deliveries[target]=result
+        with conn() as c:
+            c.execute('INSERT INTO procure_integration_events VALUES(%s,%s,%s,%s,%s,%s,%s)',
+                      (str(uuid4()),str(released['id']),target,mtype,result.get('status'),__import__('json').dumps(result),t))
+    return {'order':released,'lines':lines,'budget_check':'passed','integration':deliveries}
 
 @router.post('/v1/orders/{order_id}/lines', status_code=201)
 def add_order_line(order_id: str, b: OrderLineIn, authorization: str | None = Header(None)):
