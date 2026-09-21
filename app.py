@@ -48,6 +48,22 @@ def emit(target,message_type,payload):
         return {'status':'failed','response_code':e.code,'error':f'http_{e.code}'}
     except Exception as e:return {'status':'failed','error':type(e).__name__}
 
+def fetch_vector_material_master(sku):
+    authorization=service_authorization()
+    if not authorization:
+        raise HTTPException(503,'procure_service_token_missing')
+    url=VECTOR_BASE_URL+f'/v1/materials/{sku}/master'
+    req=urllib.request.Request(url,method='GET',headers={'Authorization':authorization,'User-Agent':'UNG-PROCURE/1.4.0'})
+    try:
+        with urllib.request.urlopen(req,timeout=8) as r:
+            return json.loads(r.read().decode() or '{}')
+    except urllib.error.HTTPError as e:
+        if e.code==404: return None
+        if e.code in (401,403): raise HTTPException(503,'vector_service_identity_rejected')
+        raise HTTPException(503,f'vector_material_master_http_{e.code}')
+    except Exception as e:
+        raise HTTPException(503,f'vector_material_master_unavailable:{type(e).__name__}')
+
 def run_acceptance_probe():
     if not DB:return
     probe_id=str(uuid4()); now=datetime.now(timezone.utc)
@@ -102,7 +118,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','vector-material-master-integration','approved-source-aware-mrp','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
@@ -214,6 +230,6 @@ def demand_recommendations(authorization:str|None=Header(None)):
     with conn() as c:return c.execute('SELECT * FROM demand_recommendations ORDER BY created_at DESC LIMIT 100').fetchall()
 
 
-install_planning_routes(app, conn, auth, emit)
+install_planning_routes(app, conn, auth, emit, fetch_vector_material_master)
 
 install_production_routes(app, conn, auth)
