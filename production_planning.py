@@ -202,7 +202,23 @@ def init_planning(conn):
         c.execute("ALTER TABLE procure_mrp_requirements ADD COLUMN IF NOT EXISTS release_date TIMESTAMPTZ NULL")
         c.execute("ALTER TABLE procure_mrp_requirements ADD COLUMN IF NOT EXISTS lot_policy TEXT NOT NULL DEFAULT 'lot_for_lot'")
 
-def install_planning_routes(app, conn, auth, emit=None):
+def material_planning_defaults(master):
+    master=master or {}
+    planning=master.get("planning") or {}
+    approved_sources=[x for x in (master.get("sources") or []) if x.get("approved")]
+    policy=planning.get("mrp_policy") or "mrp"
+    lot_policy={"mrp":"lot_for_lot","lot_for_lot":"lot_for_lot","fixed":"fixed","minimum":"minimum"}.get(policy,"lot_for_lot")
+    return {
+        "safety_stock":float(planning.get("safety_stock") or 0),
+        "min_order_qty":float(planning.get("min_order_qty") or 0),
+        "order_multiple":float(planning.get("order_multiple") or 1),
+        "lead_time_days":int(planning.get("lead_time_days") or 0),
+        "lot_policy":lot_policy,
+        "make_buy":planning.get("make_buy") or "buy",
+        "approved_sources":approved_sources,
+    }
+
+def install_planning_routes(app, conn, auth, emit=None, material_lookup=None):
     def publish(event):
         if not emit: return {"status":"disabled"}
         return emit(event["target_system"],event["message_type"],event["payload"])
@@ -362,19 +378,28 @@ def install_planning_routes(app, conn, auth, emit=None):
                 gross=lots*item["quantity_per"]*(1+item["scrap_pct"]/100.0)
                 on=float(b.on_hand.get(sku,0))
                 receipts=float(b.scheduled_receipts.get(sku,0))
-                safety=float(b.safety_stock.get(sku,0))
-                policy=b.lot_policy.get(sku,"lot_for_lot")
-                calc=calculate_mrp_line(
-                    gross,on,receipts,safety,policy,
-                    b.fixed_order_qty.get(sku,0),b.min_order_qty.get(sku,0),
-                    b.order_multiple.get(sku,1),b.lead_time_days.get(sku,0),b.period_start
-                )
+                master=material_lookup(sku) if material_lookup else None
+                defaults=material_planning_defaults(master)
+                safety=float(b.safety_stock[sku]) if sku in b.safety_stock else defaults["safety_stock"]
+                policy=b.lot_policy.get(sku,defaults["lot_policy"])
+                fixed=float(b.fixed_order_qty.get(sku,0))
+                minimum=float(b.min_order_qty[sku]) if sku in b.min_order_qty else defaults["min_order_qty"]
+                multiple=float(b.order_multiple[sku]) if sku in b.order_multiple else defaults["order_multiple"]
+                lead=int(b.lead_time_days[sku]) if sku in b.lead_time_days else defaults["lead_time_days"]
+                calc=calculate_mrp_line(gross,on,receipts,safety,policy,fixed,minimum,multiple,lead,b.period_start)
                 row=c.execute("""INSERT INTO procure_mrp_requirements
                   (id,run_id,component_sku,gross_requirement,on_hand,scheduled_receipts,safety_stock,
                    net_requirement,planned_order_qty,projected_available,need_date,release_date,lot_policy)
                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                   (str(uuid4()),run_id,sku,gross,on,receipts,safety,calc["net_requirement"],
                    calc["planned_order_qty"],calc["projected_available"],calc["need_date"],calc["release_date"],policy)).fetchone()
+                row["material_master"]={
+                    "make_buy":defaults["make_buy"],
+                    "lead_time_days":lead,
+                    "order_multiple":multiple,
+                    "min_order_qty":minimum,
+                    "approved_sources":defaults["approved_sources"],
+                }
                 out.append(row)
         run={"id":run_id,"product_sku":b.product_sku,"period_start":b.period_start,"planned_qty":b.planned_qty}
         event=mrp_completed(run,out)
