@@ -120,6 +120,11 @@ class GateDecision(BaseModel):
     passed: bool
     note: str = ""
 
+class PlannedOrderConvertIn(BaseModel):
+    owner: str = "MRP"
+    priority: str = "normal"
+    requested_location: str | None = None
+
 class ProductionOrderIn(BaseModel):
     mps_id: str | None = None
     product_sku: str
@@ -201,6 +206,16 @@ def init_planning(conn):
         c.execute("ALTER TABLE procure_mrp_requirements ADD COLUMN IF NOT EXISTS need_date TIMESTAMPTZ NULL")
         c.execute("ALTER TABLE procure_mrp_requirements ADD COLUMN IF NOT EXISTS release_date TIMESTAMPTZ NULL")
         c.execute("ALTER TABLE procure_mrp_requirements ADD COLUMN IF NOT EXISTS lot_policy TEXT NOT NULL DEFAULT 'lot_for_lot'")
+        c.execute("""CREATE TABLE IF NOT EXISTS procure_planned_orders(
+          id UUID PRIMARY KEY,run_id UUID NOT NULL REFERENCES procure_mrp_runs(id) ON DELETE CASCADE,
+          requirement_id UUID NOT NULL REFERENCES procure_mrp_requirements(id) ON DELETE CASCADE,
+          sku TEXT NOT NULL,order_type TEXT NOT NULL CHECK(order_type IN ('BUY','MAKE')),
+          quantity DOUBLE PRECISION NOT NULL CHECK(quantity>0),need_date TIMESTAMPTZ NULL,release_date TIMESTAMPTZ NULL,
+          source_supplier_id TEXT NULL,source_unit_price DOUBLE PRECISION NULL,source_currency TEXT NULL,
+          status TEXT NOT NULL DEFAULT 'planned',converted_document_type TEXT NULL,converted_document_id UUID NULL,
+          created_at TIMESTAMPTZ NOT NULL,updated_at TIMESTAMPTZ NOT NULL,
+          UNIQUE(requirement_id))""")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_procure_planned_orders_run ON procure_planned_orders(run_id,status)")
 
 def material_planning_defaults(master):
     master=master or {}
@@ -400,10 +415,73 @@ def install_planning_routes(app, conn, auth, emit=None, material_lookup=None):
                     "min_order_qty":minimum,
                     "approved_sources":defaults["approved_sources"],
                 }
+                if calc["planned_order_qty"] > 0:
+                    order_type="MAKE" if defaults["make_buy"]=="make" else "BUY"
+                    source=None
+                    if order_type=="BUY" and defaults["approved_sources"]:
+                        priced=[x for x in defaults["approved_sources"] if x.get("unit_price") is not None]
+                        source=min(priced,key=lambda x:float(x["unit_price"])) if priced else defaults["approved_sources"][0]
+                    planned_order=c.execute("""INSERT INTO procure_planned_orders(
+                      id,run_id,requirement_id,sku,order_type,quantity,need_date,release_date,
+                      source_supplier_id,source_unit_price,source_currency,status,created_at,updated_at)
+                      VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'planned',%s,%s)
+                      ON CONFLICT(requirement_id) DO UPDATE SET quantity=EXCLUDED.quantity,need_date=EXCLUDED.need_date,
+                      release_date=EXCLUDED.release_date,source_supplier_id=EXCLUDED.source_supplier_id,
+                      source_unit_price=EXCLUDED.source_unit_price,source_currency=EXCLUDED.source_currency,
+                      updated_at=EXCLUDED.updated_at RETURNING *""",
+                      (str(uuid4()),run_id,row["id"],sku,order_type,calc["planned_order_qty"],calc["need_date"],calc["release_date"],
+                       source.get("supplier_id") if source else None,source.get("unit_price") if source else None,
+                       source.get("currency") if source else None,t,t)).fetchone()
+                    row["planned_order"]=planned_order
                 out.append(row)
         run={"id":run_id,"product_sku":b.product_sku,"period_start":b.period_start,"planned_qty":b.planned_qty}
         event=mrp_completed(run,out)
         return {"run_id":run_id,"product_sku":b.product_sku,"planned_qty":b.planned_qty,"requirements":out,"integration_event":event,"integration_delivery":publish(event)}
+
+    @router.get("/mrp/{run_id}/planned-orders")
+    def get_planned_orders(run_id:str, authorization:str|None=Header(None)):
+        auth("procure.production.read", authorization)
+        with conn() as c:
+            if not c.execute("SELECT 1 FROM procure_mrp_runs WHERE id=%s",(run_id,)).fetchone():
+                raise HTTPException(404,"mrp_run_not_found")
+            return c.execute("SELECT * FROM procure_planned_orders WHERE run_id=%s ORDER BY release_date NULLS LAST,sku",(run_id,)).fetchall()
+
+    @router.post("/planned-orders/{planned_order_id}/convert")
+    def convert_planned_order(planned_order_id:str,b:PlannedOrderConvertIn,authorization:str|None=Header(None)):
+        auth("procure.production.write", authorization)
+        t=now()
+        with conn() as c:
+            po=c.execute("SELECT * FROM procure_planned_orders WHERE id=%s FOR UPDATE",(planned_order_id,)).fetchone()
+            if not po: raise HTTPException(404,"planned_order_not_found")
+            if po["status"]!="planned": raise HTTPException(409,"planned_order_not_convertible")
+            if po["order_type"]=="BUY":
+                request_id=str(uuid4())
+                request=c.execute("""INSERT INTO procure_requests
+                  (id,title,description,requester,status,priority,estimated_value,currency,created_at,updated_at)
+                  VALUES(%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s) RETURNING *""",
+                  (request_id,f"MRP BUY {po['sku']}",f"Generated from MRP planned order {po['id']}",b.owner,b.priority,
+                   float(po["quantity"])*float(po["source_unit_price"] or 0),po["source_currency"] or "USD",t,t)).fetchone()
+                line=c.execute("""INSERT INTO procure_request_lines
+                  (id,request_id,line_no,sku,description,quantity,uom,target_delivery_date,requested_location,
+                   estimated_unit_price,cost_center_ref,account_assignment_ref)
+                  VALUES(%s,%s,1,%s,%s,%s,'EA',%s,%s,%s,NULL,NULL) RETURNING *""",
+                  (str(uuid4()),request_id,po["sku"],f"MRP replenishment for {po['sku']}",po["quantity"],
+                   po["need_date"].date() if po["need_date"] else None,b.requested_location,po["source_unit_price"] or 0)).fetchone()
+                c.execute("""UPDATE procure_planned_orders SET status='converted',converted_document_type='REQUISITION',
+                  converted_document_id=%s,updated_at=%s WHERE id=%s""",(request_id,t,planned_order_id))
+                return {"planned_order_id":planned_order_id,"conversion":"REQUISITION","request":request,"line":line,
+                        "preferred_supplier_id":po["source_supplier_id"]}
+            order_id=str(uuid4())
+            n=c.execute("SELECT COUNT(*) n FROM procure_production_orders").fetchone()["n"]+1
+            number=f"MO-{t.year}-{n:06d}"
+            order=c.execute("""INSERT INTO procure_production_orders(
+              id,order_number,mps_id,product_sku,planned_qty,completed_qty,work_center,planned_start,planned_end,
+              actual_start,actual_end,status,good_qty,scrap_qty,downtime_minutes,created_at,updated_at)
+              VALUES(%s,%s,NULL,%s,%s,0,NULL,%s,%s,NULL,NULL,'planned',0,0,0,%s,%s) RETURNING *""",
+              (order_id,number,po["sku"],po["quantity"],po["release_date"] or t,po["need_date"],t,t)).fetchone()
+            c.execute("""UPDATE procure_planned_orders SET status='converted',converted_document_type='PRODUCTION_ORDER',
+              converted_document_id=%s,updated_at=%s WHERE id=%s""",(order_id,t,planned_order_id))
+            return {"planned_order_id":planned_order_id,"conversion":"PRODUCTION_ORDER","order":order}
 
     @router.get("/mrp/{run_id}")
     def get_mrp(run_id:str, authorization:str|None=Header(None)):
