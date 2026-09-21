@@ -70,6 +70,14 @@ class ScheduleIn(BaseModel):
     scheduled_quantity: Decimal
     due_date: date
 
+class SourceSelectionIn(BaseModel):
+    budget_scope: str | None = None
+
+class SupplierAckIn(BaseModel):
+    acknowledged_quantity: Decimal
+    promised_date: date | None = None
+    note: str = ''
+
 
 def init_purchasing_documents(conn):
     with conn() as c:
@@ -133,6 +141,24 @@ def init_purchasing_documents(conn):
           due_date DATE NOT NULL,
           status TEXT NOT NULL,
           UNIQUE(order_line_id,schedule_no))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS procure_budget_controls(
+          scope TEXT PRIMARY KEY,
+          currency TEXT NOT NULL,
+          ceiling NUMERIC(18,4) NOT NULL CHECK(ceiling>=0),
+          reserved_amount NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK(reserved_amount>=0),
+          spent_amount NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK(spent_amount>=0),
+          status TEXT NOT NULL DEFAULT 'active',
+          updated_at TIMESTAMPTZ NOT NULL)''')
+        c.execute("""INSERT INTO procure_budget_controls(scope,currency,ceiling,reserved_amount,spent_amount,status,updated_at)
+          VALUES('acceptance','USD',150,0,0,'active',%s)
+          ON CONFLICT(scope) DO NOTHING""",(now(),))
+        c.execute("ALTER TABLE procure_orders ADD COLUMN IF NOT EXISTS budget_scope TEXT NULL")
+        c.execute("ALTER TABLE procure_orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ NULL")
+        c.execute('''CREATE TABLE IF NOT EXISTS procure_supplier_acknowledgements(
+          id UUID PRIMARY KEY,order_id UUID NOT NULL REFERENCES procure_orders(id) ON DELETE CASCADE,
+          acknowledged_quantity NUMERIC(18,4) NOT NULL CHECK(acknowledged_quantity>=0),
+          promised_date DATE NULL,note TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,
+          acknowledged_at TIMESTAMPTZ NOT NULL)''')
 
 
 def _deps():
@@ -232,6 +258,116 @@ def compare_rfq(rfq_id: str, authorization: str | None = Header(None)):
                             ORDER BY q.request_line_id,q.unit_price ASC,q.lead_time_days ASC''', (rfq_id,)).fetchall()
         return {'rfq_id': rfq_id, 'quotes': rows}
 
+
+@router.post('/v1/rfqs/{rfq_id}/select', status_code=201)
+def select_rfq_sources(rfq_id: str, b: SourceSelectionIn, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.awards.write', authorization)
+    with conn() as c:
+        rfq=c.execute('SELECT * FROM procure_rfqs WHERE id=%s FOR UPDATE',(rfq_id,)).fetchone()
+        if not rfq: raise HTTPException(404,'rfq_not_found')
+        lines=c.execute('SELECT * FROM procure_request_lines WHERE request_id=%s ORDER BY line_no',(rfq['request_id'],)).fetchall()
+        if not lines: raise HTTPException(409,'rfq_has_no_request_lines')
+        selected=[]
+        total=Decimal('0')
+        vendor_ids=set()
+        for line in lines:
+            quotes=c.execute('''SELECT q.*,v.name vendor_name FROM procure_rfq_quotes q
+              JOIN procure_vendors v ON v.id=q.vendor_id
+              WHERE q.rfq_id=%s AND q.request_line_id=%s AND q.status='submitted'
+              ORDER BY q.unit_price ASC,q.lead_time_days ASC''',(rfq_id,line['id'])).fetchall()
+            if not quotes: raise HTTPException(409,f'no_quote_for_line:{line["line_no"]}')
+            q=quotes[0]
+            selected.append((line,q))
+            vendor_ids.add(str(q['vendor_id']))
+            total += Decimal(str(line['quantity'])) * Decimal(str(q['unit_price']))
+        if len(vendor_ids) != 1:
+            raise HTTPException(409,'multi_vendor_award_requires_split_po')
+        vendor_id=next(iter(vendor_ids))
+        t=now()
+        order_id=str(uuid4())
+        order=c.execute('''INSERT INTO procure_orders
+          (id,request_id,vendor_id,amount,currency,status,issued_at,updated_at,budget_scope,released_at)
+          VALUES(%s,%s,%s,%s,%s,'draft',%s,%s,%s,NULL) RETURNING *''',
+          (order_id,rfq['request_id'],vendor_id,total,(selected[0][1]['currency'] or 'USD').upper(),t,t,b.budget_scope)).fetchone()
+        out_lines=[]
+        for line,q in selected:
+            out_lines.append(c.execute('''INSERT INTO procure_order_lines
+              (id,order_id,line_no,sku,description,ordered_quantity,received_quantity,uom,unit_price,currency,tax_code,receiving_location,status)
+              VALUES(%s,%s,%s,%s,%s,%s,0,%s,%s,%s,NULL,%s,'open') RETURNING *''',
+              (str(uuid4()),order_id,line['line_no'],line['sku'],line['description'],line['quantity'],line['uom'],
+               q['unit_price'],q['currency'].upper(),line['requested_location'])).fetchone())
+            c.execute("UPDATE procure_rfq_quotes SET status=CASE WHEN id=%s THEN 'selected' ELSE status END WHERE rfq_id=%s AND request_line_id=%s",(q['id'],rfq_id,line['id']))
+        c.execute("UPDATE procure_rfqs SET status='awarded' WHERE id=%s",(rfq_id,))
+        c.execute("UPDATE procure_requests SET status='awarded',updated_at=%s WHERE id=%s",(t,rfq['request_id']))
+    return {'order':order,'lines':out_lines,'selected_vendor_id':vendor_id,'status':'draft_pending_release'}
+
+@router.post('/v1/orders/{order_id}/release')
+def release_order(order_id: str, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.orders.write', authorization)
+    t=now()
+    with conn() as c:
+        order=c.execute('SELECT * FROM procure_orders WHERE id=%s FOR UPDATE',(order_id,)).fetchone()
+        if not order: raise HTTPException(404,'order_not_found')
+        if order['status']!='draft': raise HTTPException(409,'order_not_draft')
+        lines=c.execute('SELECT * FROM procure_order_lines WHERE order_id=%s ORDER BY line_no',(order_id,)).fetchall()
+        if not lines: raise HTTPException(409,'purchase_order_has_no_lines')
+        total=sum((Decimal(str(x['ordered_quantity']))*Decimal(str(x['unit_price'])) for x in lines),Decimal('0'))
+        if order.get('budget_scope'):
+            budget=c.execute('SELECT * FROM procure_budget_controls WHERE scope=%s FOR UPDATE',(order['budget_scope'],)).fetchone()
+            if not budget: raise HTTPException(409,'budget_scope_not_found')
+            if order['currency'].upper()!=budget['currency'].upper(): raise HTTPException(409,'budget_currency_mismatch')
+            remaining=Decimal(str(budget['ceiling']))-Decimal(str(budget['reserved_amount']))-Decimal(str(budget['spent_amount']))
+            if total > remaining:
+                raise HTTPException(409,f'budget_ceiling_exceeded:remaining={remaining}:order={total}')
+            c.execute('UPDATE procure_budget_controls SET reserved_amount=reserved_amount+%s,updated_at=%s WHERE scope=%s',(total,t,order['budget_scope']))
+        released=c.execute("UPDATE procure_orders SET amount=%s,status='issued',released_at=%s,updated_at=%s WHERE id=%s RETURNING *",(total,t,t,order_id)).fetchone()
+    from app import emit
+    payload={
+        'order_id':str(released['id']),
+        'request_id':str(released['request_id']),
+        'vendor_id':str(released['vendor_id']),
+        'amount':float(released['amount']),
+        'currency':released['currency'],
+        'status':released['status'],
+    }
+    deliveries={}
+    for target,mtype in [('UNG-MIDAS','PROCURE.PURCHASE_ORDER.AWARDED'),('UNG-VECTOR','PROCURE.PURCHASE_ORDER.RECEIVING_EXPECTED')]:
+        result=emit(target,mtype,payload); deliveries[target]=result
+        with conn() as c:
+            c.execute('INSERT INTO procure_integration_events VALUES(%s,%s,%s,%s,%s,%s,%s)',
+                      (str(uuid4()),str(released['id']),target,mtype,result.get('status'),__import__('json').dumps(result),t))
+    return {'order':released,'lines':lines,'budget_check':'passed','integration':deliveries}
+
+@router.post('/v1/orders/{order_id}/acknowledge', status_code=201)
+def supplier_acknowledge(order_id: str, b: SupplierAckIn, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.orders.write', authorization)
+    if b.acknowledged_quantity < 0:
+        raise HTTPException(422,'acknowledged_quantity_cannot_be_negative')
+    t=now()
+    with conn() as c:
+        order=c.execute('SELECT * FROM procure_orders WHERE id=%s FOR UPDATE',(order_id,)).fetchone()
+        if not order: raise HTTPException(404,'order_not_found')
+        if order['status']!='issued': raise HTTPException(409,'order_not_issued')
+        ordered=c.execute('SELECT COALESCE(sum(ordered_quantity),0) q FROM procure_order_lines WHERE order_id=%s',(order_id,)).fetchone()['q']
+        if Decimal(str(b.acknowledged_quantity)) > Decimal(str(ordered)):
+            raise HTTPException(409,'acknowledgement_exceeds_order_quantity')
+        status='acknowledged' if Decimal(str(b.acknowledged_quantity))==Decimal(str(ordered)) else 'partially_acknowledged'
+        ack=c.execute('''INSERT INTO procure_supplier_acknowledgements
+          (id,order_id,acknowledged_quantity,promised_date,note,status,acknowledged_at)
+          VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+          (str(uuid4()),order_id,b.acknowledged_quantity,b.promised_date,b.note,status,t)).fetchone()
+        c.execute('UPDATE procure_orders SET status=%s,updated_at=%s WHERE id=%s',(status,t,order_id))
+    return {'order_id':order_id,'acknowledgement':ack,'ordered_quantity':ordered,'status':status}
+
+@router.get('/v1/orders/{order_id}/acknowledgements')
+def supplier_acknowledgements(order_id: str, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.orders.read', authorization)
+    with conn() as c:
+        return c.execute('SELECT * FROM procure_supplier_acknowledgements WHERE order_id=%s ORDER BY acknowledged_at',(order_id,)).fetchall()
 
 @router.post('/v1/orders/{order_id}/lines', status_code=201)
 def add_order_line(order_id: str, b: OrderLineIn, authorization: str | None = Header(None)):
