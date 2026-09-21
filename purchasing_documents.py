@@ -73,6 +73,11 @@ class ScheduleIn(BaseModel):
 class SourceSelectionIn(BaseModel):
     budget_scope: str | None = None
 
+class SupplierAckIn(BaseModel):
+    acknowledged_quantity: Decimal
+    promised_date: date | None = None
+    note: str = ''
+
 
 def init_purchasing_documents(conn):
     with conn() as c:
@@ -149,6 +154,11 @@ def init_purchasing_documents(conn):
           ON CONFLICT(scope) DO NOTHING""",(now(),))
         c.execute("ALTER TABLE procure_orders ADD COLUMN IF NOT EXISTS budget_scope TEXT NULL")
         c.execute("ALTER TABLE procure_orders ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ NULL")
+        c.execute('''CREATE TABLE IF NOT EXISTS procure_supplier_acknowledgements(
+          id UUID PRIMARY KEY,order_id UUID NOT NULL REFERENCES procure_orders(id) ON DELETE CASCADE,
+          acknowledged_quantity NUMERIC(18,4) NOT NULL CHECK(acknowledged_quantity>=0),
+          promised_date DATE NULL,note TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,
+          acknowledged_at TIMESTAMPTZ NOT NULL)''')
 
 
 def _deps():
@@ -329,6 +339,35 @@ def release_order(order_id: str, authorization: str | None = Header(None)):
             c.execute('INSERT INTO procure_integration_events VALUES(%s,%s,%s,%s,%s,%s,%s)',
                       (str(uuid4()),str(released['id']),target,mtype,result.get('status'),__import__('json').dumps(result),t))
     return {'order':released,'lines':lines,'budget_check':'passed','integration':deliveries}
+
+@router.post('/v1/orders/{order_id}/acknowledge', status_code=201)
+def supplier_acknowledge(order_id: str, b: SupplierAckIn, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.orders.write', authorization)
+    if b.acknowledged_quantity < 0:
+        raise HTTPException(422,'acknowledged_quantity_cannot_be_negative')
+    t=now()
+    with conn() as c:
+        order=c.execute('SELECT * FROM procure_orders WHERE id=%s FOR UPDATE',(order_id,)).fetchone()
+        if not order: raise HTTPException(404,'order_not_found')
+        if order['status']!='issued': raise HTTPException(409,'order_not_issued')
+        ordered=c.execute('SELECT COALESCE(sum(ordered_quantity),0) q FROM procure_order_lines WHERE order_id=%s',(order_id,)).fetchone()['q']
+        if Decimal(str(b.acknowledged_quantity)) > Decimal(str(ordered)):
+            raise HTTPException(409,'acknowledgement_exceeds_order_quantity')
+        status='acknowledged' if Decimal(str(b.acknowledged_quantity))==Decimal(str(ordered)) else 'partially_acknowledged'
+        ack=c.execute('''INSERT INTO procure_supplier_acknowledgements
+          (id,order_id,acknowledged_quantity,promised_date,note,status,acknowledged_at)
+          VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+          (str(uuid4()),order_id,b.acknowledged_quantity,b.promised_date,b.note,status,t)).fetchone()
+        c.execute('UPDATE procure_orders SET status=%s,updated_at=%s WHERE id=%s',(status,t,order_id))
+    return {'order_id':order_id,'acknowledgement':ack,'ordered_quantity':ordered,'status':status}
+
+@router.get('/v1/orders/{order_id}/acknowledgements')
+def supplier_acknowledgements(order_id: str, authorization: str | None = Header(None)):
+    conn, auth = _deps()
+    auth('procure.orders.read', authorization)
+    with conn() as c:
+        return c.execute('SELECT * FROM procure_supplier_acknowledgements WHERE order_id=%s ORDER BY acknowledged_at',(order_id,)).fetchall()
 
 @router.post('/v1/orders/{order_id}/lines', status_code=201)
 def add_order_line(order_id: str, b: OrderLineIn, authorization: str | None = Header(None)):
