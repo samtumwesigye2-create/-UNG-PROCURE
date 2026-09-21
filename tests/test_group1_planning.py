@@ -66,3 +66,23 @@ def test_vector_material_master_defaults_are_applied():
 def test_vector_unknown_policy_falls_back_to_lot_for_lot():
     d=material_planning_defaults({'planning':{'mrp_policy':'custom'}})
     assert d['lot_policy']=='lot_for_lot'
+
+
+def test_buy_material_prefers_lowest_priced_approved_source():
+    master={
+        'planning':{'make_buy':'buy'},
+        'sources':[
+            {'supplier_id':'SUP-A','approved':True,'unit_price':2.5,'currency':'USD'},
+            {'supplier_id':'SUP-B','approved':True,'unit_price':1.5,'currency':'USD'},
+            {'supplier_id':'SUP-C','approved':False,'unit_price':0.5,'currency':'USD'},
+        ],
+    }
+    d=material_planning_defaults(master)
+    priced=[x for x in d['approved_sources'] if x.get('unit_price') is not None]
+    chosen=min(priced,key=lambda x:float(x['unit_price']))
+    assert chosen['supplier_id']=='SUP-B'
+
+
+def test_make_material_keeps_make_buy_flag():
+    d=material_planning_defaults({'planning':{'make_buy':'make'}})
+    assert d['make_buy']=='make'
