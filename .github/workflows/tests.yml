@@ -3,7 +3,7 @@ name: tests
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
 
 jobs:
   pytest:
@@ -16,4 +16,4 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=. pytest -q
-      - run: PYTHONPATH=. python -m py_compile app.py demand_intelligence.py supplier_profiles.py purchasing_documents.py procure_matching.py
+      - run: PYTHONPATH=. python -m py_compile app.py demand_intelligence.py supplier_profiles.py purchasing_documents.py procure_matching.py production_planning.py
