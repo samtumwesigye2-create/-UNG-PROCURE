@@ -10,6 +10,7 @@ from procure_matching import init_procure_matching
 from demand_intelligence import init_demand_intelligence, classify_demand, forecast_demand, calculate_replenishment
 from production_planning import init_planning, install_planning_routes
 from manufacturing_operations import init_production, install_production_routes
+from resilience_control import init_resilience, install_resilience_routes
 
 app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
@@ -92,6 +93,7 @@ def init():
         init_demand_intelligence(conn)
         init_planning(conn)
         init_production(conn)
+        init_resilience(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
@@ -118,7 +120,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','vector-material-master-integration','approved-source-aware-mrp','mrp-planned-orders','planned-buy-to-requisition','planned-make-to-production-order','rfq-source-selection','budget-gated-po-release','acceptance-budget-150','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','vector-material-master-integration','approved-source-aware-mrp','mrp-planned-orders','planned-buy-to-requisition','planned-make-to-production-order','rfq-source-selection','budget-gated-po-release','acceptance-budget-150','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking','resilient-supply-chain','sense-assess-respond-recover','supply-chain-control-tower','supplier-tier-risk','continuity-scoring','recovery-actions','alternate-sourcing-readiness']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
@@ -231,3 +233,4 @@ def demand_recommendations(authorization:str|None=Header(None)):
 install_planning_routes(app, conn, auth, emit, fetch_vector_material_master)
 
 install_production_routes(app, conn, auth)
+install_resilience_routes(app, conn, auth, emit)
