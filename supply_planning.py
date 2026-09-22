@@ -121,6 +121,16 @@ def install_supply_planning_routes(app,conn,auth,emit):
         total=sum(float(r["available_units"]) for r in rows)
         return {"sku":sku,"available_supplier_capacity":round(total,2),"suppliers":rows}
 
+    @router.get("/plans")
+    def list_supply_plans(status:str|None=None,authorization:str|None=Header(None)):
+        auth("procure.production.read",authorization)
+        with conn() as c:
+            if status:
+                return c.execute("""SELECT * FROM procure_supply_plans
+                  WHERE status=%s ORDER BY period_start DESC,created_at DESC LIMIT 500""",(status,)).fetchall()
+            return c.execute("""SELECT * FROM procure_supply_plans
+              ORDER BY period_start DESC,created_at DESC LIMIT 500""").fetchall()
+
     @router.post("/plans",status_code=201)
     def create_supply_plan(b:SupplyPlanIn,authorization:str|None=Header(None)):
         auth("procure.production.write",authorization)
