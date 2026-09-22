@@ -7,7 +7,7 @@ EXPECTED_TABLES=[
     "procure_demand_signals","procure_supplier_capacity","procure_supply_plans","procure_supply_plan_events",
     "procure_sourcing_strategies","procure_rfps","procure_rfp_vendors","procure_supplier_evaluations",
     "procure_contracts","procure_contract_amendments","procure_supplier_relationship_reviews",
-    "procure_tco_assessments","procure_resilience_assessments","procure_resilience_actions"
+    "procure_tco_assessments","procure_resilience_assessments","procure_resilience_actions","procure_supply_chain_workflows","procure_supply_chain_workflow_stages"
 ]
 
 def install_extended_acceptance_routes(app,conn,auth):
