@@ -184,6 +184,16 @@ def install_strategic_sourcing_routes(app,conn,auth):
           JOIN procure_vendors v ON v.id=e.vendor_id WHERE e.rfp_id=%s
           ORDER BY e.total_score DESC""",(rfp_id,)).fetchall()
 
+    @router.get("/contracts")
+    def list_contracts(status:str|None=None,authorization:str|None=Header(None)):
+        auth("procure.orders.read",authorization)
+        with conn() as c:
+            if status:
+                return c.execute("""SELECT * FROM procure_contracts
+                  WHERE status=%s ORDER BY end_date NULLS LAST,created_at DESC LIMIT 500""",(status,)).fetchall()
+            return c.execute("""SELECT * FROM procure_contracts
+              ORDER BY end_date NULLS LAST,created_at DESC LIMIT 500""").fetchall()
+
     @router.post("/contracts",status_code=201)
     def create_contract(b:ContractIn,authorization:str|None=Header(None)):
         auth("procure.orders.write",authorization)
