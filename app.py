@@ -13,6 +13,7 @@ from manufacturing_operations import init_production, install_production_routes
 from resilience_control import init_resilience, install_resilience_routes
 from strategic_sourcing import init_strategic_sourcing, install_strategic_sourcing_routes
 from supply_planning import init_supply_planning, install_supply_planning_routes
+from extended_acceptance import install_extended_acceptance_routes
 
 app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
@@ -240,3 +241,4 @@ install_production_routes(app, conn, auth)
 install_resilience_routes(app, conn, auth, emit)
 install_strategic_sourcing_routes(app, conn, auth)
 install_supply_planning_routes(app, conn, auth, emit)
+install_extended_acceptance_routes(app, conn, auth)
