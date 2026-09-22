@@ -14,6 +14,7 @@ from resilience_control import init_resilience, install_resilience_routes
 from strategic_sourcing import init_strategic_sourcing, install_strategic_sourcing_routes
 from supply_planning import init_supply_planning, install_supply_planning_routes
 from extended_acceptance import install_extended_acceptance_routes
+from supply_chain_workflow import init_supply_chain_workflow, install_supply_chain_workflow_routes
 
 app=FastAPI(title='UNG-PROCURE',version='1.4.0')
 DB=os.getenv('DATABASE_URL','')
@@ -99,6 +100,7 @@ def init():
         init_resilience(conn)
         init_strategic_sourcing(conn)
         init_supply_planning(conn)
+        init_supply_chain_workflow(conn)
         run_acceptance_probe()
 
 class RequestIn(BaseModel): title:str; description:str=''; requester:str; priority:str='normal'; estimated_value:float=0; currency:str='USD'
@@ -125,7 +127,7 @@ def ready():
         return {'status':'ready','database':'connected','janus':JANUS_BASE_URL,'nexus':NEXUS_BASE_URL,'midas':MIDAS_BASE_URL,'vector':VECTOR_BASE_URL,'service_identity_configured':bool(PROCURE_SERVICE_TOKEN)}
     except Exception:return {'status':'degraded','database':'unavailable','janus':JANUS_BASE_URL}
 @app.get('/v1/system')
-def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','vector-material-master-integration','approved-source-aware-mrp','mrp-planned-orders','planned-buy-to-requisition','planned-make-to-production-order','rfq-source-selection','budget-gated-po-release','acceptance-budget-150','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking','resilient-supply-chain','sense-assess-respond-recover','supply-chain-control-tower','supplier-tier-risk','continuity-scoring','recovery-actions','alternate-sourcing-readiness','demand-signal-hub','supplier-capacity-planning','formal-supply-plan','supply-plan-approval','strategic-sourcing','rfp','contract-lifecycle','contract-amendments','contract-renewal-watch','total-cost-of-ownership','supplier-multicriteria-evaluation','supplier-relationship-reviews']}
+def system(): return {'system_id':'UNG-PROCURE','domain':'procurement','capabilities':['requisitions','vendors','bids','awards','purchase-orders','janus-bearer-auth','procure-service-identity','nexus-events','midas-finance-handoff','vector-receiving-handoff','full-chain-acceptance-probe','supplier-purchasing-profiles','requisition-lines','rfqs','rfq-quotes','purchase-order-lines','delivery-schedules','goods-receipt-projection','idempotent-inbound-events','supplier-invoice-projection','three-way-match','match-tolerances','match-exceptions','demand-classification','baseline-demand-forecasting','replenishment-recommendations','procurement-plans','demand-plans','demand-plan-approval','sop','sop-approval','bom','mps','mps-release','mrp','mrp-lot-sizing','mrp-lead-time-offset','vector-material-master-integration','approved-source-aware-mrp','mrp-planned-orders','planned-buy-to-requisition','planned-make-to-production-order','rfq-source-selection','budget-gated-po-release','acceptance-budget-150','capacity-planning','production-schedule-adherence','production-orders','shop-floor-execution-tracking','resilient-supply-chain','sense-assess-respond-recover','supply-chain-control-tower','supplier-tier-risk','continuity-scoring','recovery-actions','alternate-sourcing-readiness','demand-signal-hub','supplier-capacity-planning','formal-supply-plan','supply-plan-approval','strategic-sourcing','rfp','contract-lifecycle','contract-amendments','contract-renewal-watch','total-cost-of-ownership','supplier-multicriteria-evaluation','supplier-relationship-reviews','end-to-end-supply-chain-workflow','nine-stage-scm-orchestration']}
 @app.get('/v1/integration/acceptance')
 def acceptance_status():
     try:
@@ -242,3 +244,4 @@ install_resilience_routes(app, conn, auth, emit)
 install_strategic_sourcing_routes(app, conn, auth)
 install_supply_planning_routes(app, conn, auth, emit)
 install_extended_acceptance_routes(app, conn, auth)
+install_supply_chain_workflow_routes(app, conn, auth, emit)
