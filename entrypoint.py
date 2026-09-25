@@ -1,3 +1,4 @@
+from scm_runtime import router as scm_runtime_router
 from app import app
 from inbound_layers import router as inbound_router
 from procure_kpis import router as procure_kpis_router
@@ -10,3 +11,5 @@ app.include_router(procure_kpis_router)
 app.include_router(supplier_profiles_router)
 app.include_router(purchasing_documents_router)
 app.include_router(procure_matching_router)
+
+app.include_router(scm_runtime_router)
