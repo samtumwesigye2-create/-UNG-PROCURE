@@ -104,8 +104,7 @@ def food_loss(req:LossRequest):
  units={x.unit for x in req.items}
  return {"by_sku":[{"sku":x.sku,"unit":x.unit,"loss_rate_percent":
   round(100*x.lost/x.produced,4) if x.produced else 0} for x in req.items],
-  "aggregate_loss_rate_percent":round(100*total_lost/total_produced,4) if total_produced else 0
-   if len(units)==1 else None,
+  "aggregate_loss_rate_percent":(round(100*total_lost/total_produced,4) if total_produced else 0) if len(units)==1 else None,
   "aggregate_unit":next(iter(units)) if len(units)==1 else None}
 
 def plan(req:PlanRequest):
