@@ -257,3 +257,6 @@ install_tender_execution(app, conn, auth)
 
 from trade_documentation import install_trade_routes
 install_trade_routes(app, conn, auth)
+
+from scm_workstreams import install_scm_workstreams
+install_scm_workstreams(app, conn, auth)
