@@ -263,3 +263,6 @@ install_scm_workstreams(app, conn, auth)
 
 from scm_decision_engines import install_decision_routes
 install_decision_routes(app, auth)
+
+from scm_integration_outbox import install_scm_integration
+install_scm_integration(app, conn, auth, emit)
