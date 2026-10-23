@@ -260,3 +260,6 @@ install_trade_routes(app, conn, auth)
 
 from scm_workstreams import install_scm_workstreams
 install_scm_workstreams(app, conn, auth)
+
+from scm_decision_engines import install_decision_routes
+install_decision_routes(app, auth)
