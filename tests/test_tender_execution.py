@@ -4,7 +4,7 @@ from app import app
 
 def test_tender_requires_janus():
     c=TestClient(app)
-    assert c.post("/v1/scm/tenders",json={}).status_code in (401,403)
+    assert c.post("/v1/scm/tenders",json={"reference":"RFQ-AUTH","title":"Equipment supply","closing_at":"2030-01-01T00:00:00+00:00","currency":"USD"}).status_code in (401,403)
 
 def test_tender_validation_before_database():
     from tender_execution import TenderIn
