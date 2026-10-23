@@ -248,3 +248,6 @@ install_strategic_sourcing_routes(app, conn, auth)
 install_supply_planning_routes(app, conn, auth, emit)
 install_extended_acceptance_routes(app, conn, auth)
 install_supply_chain_workflow_routes(app, conn, auth, emit)
+
+from scm_governance import install_scm_governance
+install_scm_governance(app, conn, auth)
