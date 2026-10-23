@@ -254,3 +254,6 @@ install_scm_governance(app, conn, auth)
 
 from tender_execution import install_tender_execution
 install_tender_execution(app, conn, auth)
+
+from trade_documentation import install_trade_routes
+install_trade_routes(app, conn, auth)
